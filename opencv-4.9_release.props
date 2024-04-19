@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ImportGroup Label="PropertySheets" />
+  <PropertyGroup Label="UserMacros">
+    <opencvDir>C:\cppDev\opencv-4.9\build</opencvDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(opencvDir)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <AdditionalLibraryDirectories>$(opencvDir)\x64\vc16\lib\;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>
+      opencv_world490.lib;
+      %(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+    <PostBuildEvent>
+      <Command>
+	  xcopy /y "$(librealsenseSDK)\bin\$(PlatformShortName)\realsense2.dll" "$(OutDir)"
+    xcopy /y "$(opencvDir)\x64\vc16\bin\opencv_world490.dll" "$(OutDir)"
+	  xcopy /y "$(opencvDir)\x64\vc16\bin\opencv_videoio_msmf490_64.dll" "$(OutDir)"
+    xcopy /y "$(opencvDir)\x64\vc16\bin\opencv_videoio_ffmpeg490_64.dll" "$(OutDir)"
+    </Command>
+    </PostBuildEvent>
+    <PostBuildEvent>
+      <Message>Copy OpenCV shared modules next to the application</Message>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemGroup />
+  <ItemGroup>
+    <BuildMacro Include="opencvDir">
+      <Value>$(opencvDir)</Value>
+    </BuildMacro>
+  </ItemGroup>
+</Project>
