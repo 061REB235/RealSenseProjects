@@ -2,10 +2,5 @@
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <ClCompile Include="BlobTracker.cpp" />
-    <ClCompile Include="..\glad.c" />
-    <ClCompile Include="gui.cpp" />
-  </ItemGroup>
-  <ItemGroup>
-    <ClInclude Include="gui.h" />
   </ItemGroup>
 </Project>
