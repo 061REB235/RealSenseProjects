@@ -1,7 +1,4 @@
-﻿// License: Apache 2.0. See LICENSE file in root directory.
-// Copyright(c) 2017 Intel Corporation. All Rights Reserved.
-
-#include <librealsense2/rs.hpp> // Include RealSense Cross Platform API
+﻿#include <librealsense2/rs.hpp> // Include RealSense Cross Platform API
 #include "example.hpp"          // Include short list of convenience functions for rendering
 
 #include <opencv2/opencv.hpp>
@@ -21,7 +18,7 @@
 
 
 // uncoment to enable opencv blob prieview window with sliders
-//#define CV_WINDOW
+#define CV_WINDOW
 
 // color filter and blob detection defaults
 int threshold_LAB_L = 50;
@@ -30,7 +27,10 @@ int dilate_size = 2;
 
 int Circularity_min = 50;
 int Convexity_min = 70; 
-int Inertia_min = 60; 
+int Inertia_min = 60;
+
+int maxDistancePixels = 30;
+int maxHoldFrames = 15;
 
 cv::Ptr<cv::SimpleBlobDetector> blobDetector;
 cv::SimpleBlobDetector::Params blobParams;
@@ -41,20 +41,88 @@ using pixel = std::pair<int, int>;
 // Application state shared between the main-thread and GLFW events
 struct state {
     bool new_click = false;
-    bool track = false;
+    bool start_tracking = false;
+    bool tracking = false;
     pixel last_click;
     pixel mouse_position; // Add this to track the mouse position continuously
     float last_point[3] = { 0, 0, 0 }; // To store the last 3D point
     cv::Scalar trackLABmin{ 0, 0, 0 };
     cv::Scalar trackLABmax{ 0, 0, 0 };
     cv::Vec3b trackColorLab{ 0, 0, 0 };
-
+    cv::KeyPoint lastBlobCenter;
+    int blobHoldFrames;
 };
 
 state app_state;
 
 // Helper function to register to UI events
 void register_glfw_callbacks(window& app, state& app_state);
+
+void drawCross(int centerX, int centerY);
+
+// Find closest blob keypoint
+cv::KeyPoint findClosestKeypoint(const std::vector<cv::KeyPoint>& keypoints, const pixel& pixel, int maxDistance) {
+    if (keypoints.empty()) {
+        throw std::runtime_error("The keypoints vector is empty.");
+    }
+
+    double minDistance = std::numeric_limits<double>::max();
+    cv::KeyPoint closestKeypoint;
+    bool found = false;
+
+    for (const auto& keypoint : keypoints) {
+        double dx = keypoint.pt.x - pixel.first;
+        double dy = keypoint.pt.y - pixel.second;
+        double distance = std::sqrt(dx * dx + dy * dy);
+
+        if (distance < minDistance) {
+            minDistance = distance;
+            closestKeypoint = keypoint;
+            found = true;
+        }
+    }
+
+    if (!found || minDistance > maxDistance) {
+        throw std::runtime_error("No keypoints found within the maximum distance.");
+    }
+
+    return closestKeypoint;
+}
+
+cv::KeyPoint findClosestKeypoint(const std::vector<cv::KeyPoint>& keypoints, const cv::KeyPoint& referenceKeypoint, int maxDistance) {
+    if (keypoints.empty()) {
+        throw std::runtime_error("The keypoints vector is empty.");
+    }
+
+    double minDistance = std::numeric_limits<double>::max();
+    cv::KeyPoint closestKeypoint;
+    bool found = false;
+
+    for (const auto& keypoint : keypoints) {
+        double dx = keypoint.pt.x - referenceKeypoint.pt.x;
+        double dy = keypoint.pt.y - referenceKeypoint.pt.y;
+        double distance = std::sqrt(dx * dx + dy * dy);
+
+        if (distance < minDistance) {
+            minDistance = distance;
+            closestKeypoint = keypoint;
+            found = true;
+        }
+    }
+
+    if (!found || minDistance > maxDistance) {
+        throw std::runtime_error("No keypoints found within the maximum distance.");
+    }
+
+    return closestKeypoint;
+}
+
+pixel keypointToPixel(const cv::KeyPoint& keypoint) {
+    // Convert float coordinates to integer coordinates
+    int x = static_cast<int>(keypoint.pt.x + 0.5); // Adding 0.5 for rounding
+    int y = static_cast<int>(keypoint.pt.y + 0.5); // Adding 0.5 for rounding
+    return { x, y };
+}
 
 #ifdef CV_WINDOW
 // openCV slider callbacks
@@ -246,6 +314,9 @@ int main(int argc, char* argv[]) try
 
     rs2::frameset current_frameset;
     cv::Mat cvColor;
+    std::string str_tracked = "Not tracking";
+    float trackedPixel[2];
+    float trackedPoint[3];
     // && cv::waitKey(1) < 0 && cv::getWindowProperty(window_name, cv::WND_PROP_AUTOSIZE) >= 0 - for openCV test window
     while (app) // Application still alive?
     {
@@ -276,47 +347,11 @@ int main(int argc, char* argv[]) try
             }
 
             // OpenCV
+
             // convert rs color frame to cv Lab colors
             cv::Mat r_rgb = cv::Mat(cv::Size(color.get_width(), color.get_height()), CV_8UC3, (void*)color.get_data(), cv::Mat::AUTO_STEP);
             cv::Mat cvColor;
             cvtColor(r_rgb, cvColor, cv::COLOR_RGB2Lab);
-
-            // perform folor separation
-            cv::Mat maskLAB, invMaskLAB, cvBlob, mat_with_keypoints;
-            cv::inRange(cvColor, app_state.trackLABmin, app_state.trackLABmax, maskLAB);
-
-            cv::Mat element = cv::getStructuringElement(cv::MORPH_RECT,
-                cv::Size(2 * dilate_size + 1, 2 * dilate_size + 1),
-                cv::Point(dilate_size, dilate_size));
-            cv::dilate(maskLAB, maskLAB, element);
-
-            cv::bitwise_and(cvColor, cvColor, cvBlob, maskLAB);
-
-            invMaskLAB = 255 - maskLAB;
-
-            std::vector<cv::KeyPoint> keypoints;
-            blobDetector->detect(invMaskLAB, keypoints);
-            cv::drawKeypoints(invMaskLAB, keypoints, mat_with_keypoints, cv::Scalar(0, 0, 255), cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS);
-           
-            
-            
-            //cv::threshold(grey, grey, 127, 255, cv::THRESH_BINARY);
-
-            //cvtColor(grey, grey, cv::COLOR_BGR2GRAY);
-            //std::vector<cv::Mat> cvColorChannels(3);
-           // cv::split(cvBlob, cvColorChannels); // Split into L, a, b channels
-            //cv::Mat grey = cvColorChannels[0]; // The L channel is the lightness and can be used directly as a grayscale image
-            //grey = 255-grey;
-            // Detect blobs
-           // std::vector<cv::KeyPoint> keypoints;
-            //blobDetector->detect(grey, keypoints);
-           // cv::Mat im_with_keypoints;
-            //cv::drawKeypoints(grey, keypoints, im_with_keypoints, cv::Scalar(0, 0, 255), cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS);
-
-
-#ifdef CV_WINDOW
-            cv::imshow(window_name, mat_with_keypoints);
-#endif
             
 
             if (app_state.new_click)
@@ -329,7 +364,7 @@ int main(int argc, char* argv[]) try
                 // set color range and enable tracking
                 app_state.trackLABmin = cv::Scalar(app_state.trackColorLab[0] - threshold_LAB_L, app_state.trackColorLab[1] - threshold_LAB_AB, app_state.trackColorLab[2] - threshold_LAB_AB);
                 app_state.trackLABmax = cv::Scalar(app_state.trackColorLab[0] + threshold_LAB_L, app_state.trackColorLab[1] + threshold_LAB_AB, app_state.trackColorLab[2] + threshold_LAB_AB);
-                app_state.track = true;
+                app_state.start_tracking = true;
 
                 auto intr = depth.get_profile().as<rs2::video_stream_profile>().get_intrinsics();
                 // Get distance at pixel coordinates
@@ -361,6 +396,72 @@ int main(int argc, char* argv[]) try
                 std::cout << std::endl;
                 app_state.new_click = false; // Ensure the message is printed once per click
             }
+
+            // OpenCV
+
+            // perform color separation
+            cv::Mat maskLAB;
+            cv::inRange(cvColor, app_state.trackLABmin, app_state.trackLABmax, maskLAB);
+
+            cv::Mat element = cv::getStructuringElement(cv::MORPH_RECT,
+                cv::Size(2 * dilate_size + 1, 2 * dilate_size + 1),
+                cv::Point(dilate_size, dilate_size));
+            cv::dilate(maskLAB, maskLAB, element);
+            maskLAB = 255 - maskLAB;
+            // perform blob detection
+            std::vector<cv::KeyPoint> keypoints;
+            blobDetector->detect(maskLAB, keypoints);
+
+
+            pixel blobCenterPixel = keypointToPixel(app_state.lastBlobCenter);
+            trackedPixel[0] = blobCenterPixel.first;
+            trackedPixel[1] = blobCenterPixel.second;
+
+            if (app_state.tracking) {
+                try {
+                    app_state.lastBlobCenter = findClosestKeypoint(keypoints, app_state.lastBlobCenter, maxDistancePixels);
+                    app_state.blobHoldFrames = maxHoldFrames;
+                    str_tracked = "Blob u: " + std::to_string(blobCenterPixel.first) + ", v: " + std::to_string(blobCenterPixel.second);
+                    auto intr = depth.get_profile().as<rs2::video_stream_profile>().get_intrinsics();
+                    // Get distance at pixel coordinates
+                    float distance = depth.get_distance(app_state.last_click.first, app_state.last_click.second);
+                    if (distance > 0) {
+                        rs2_deproject_pixel_to_point(trackedPoint, &intr, trackedPixel, distance);
+                        str_tracked += ",\nx: " + std::to_string(trackedPoint[0]) + ",\ny: " + std::to_string(trackedPoint[1]) + ",\nz: " + std::to_string(trackedPoint[2]);
+                    }
+                    else {
+                        str_tracked += "\n Invalid depth";
+                    }
+
+                } catch (const std::runtime_error& e) {
+                    app_state.blobHoldFrames--;
+                    if (app_state.blobHoldFrames <= 0) {
+                        app_state.tracking = false;
+                        str_tracked = "Blob dropped";
+                    }
+                    //std::cerr << "Error: " << e.what() << std::endl;
+                }
+            } else if (app_state.start_tracking) {
+
+                try {
+                    app_state.lastBlobCenter = findClosestKeypoint(keypoints, app_state.last_click, maxDistancePixels);
+                    app_state.start_tracking = false;
+                    app_state.tracking = true;
+                    app_state.blobHoldFrames = maxHoldFrames;
+                }
+                catch (const std::runtime_error& e) {
+                    app_state.start_tracking = false;
+                    str_tracked = "Couldn`t start blob tracking";
+                    //std::cerr << "Error: " << e.what() << std::endl;
+                }
+            }
+
+            // display mask with keypoints
+#ifdef CV_WINDOW
+            cv::Mat maskLAB_with_keypoints;
+            cv::drawKeypoints(maskLAB, keypoints, maskLAB_with_keypoints, cv::Scalar(0, 0, 255), cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS);
+            cv::imshow(window_name, maskLAB_with_keypoints);
+#endif
             
 
             glEnable(GL_BLEND);
@@ -374,25 +475,34 @@ int main(int argc, char* argv[]) try
             // pixels out of FOV will appear transparent)
             color_image.render(color, { 0, 0, app.width(), app.height() });
 
-            // Render opencv
-
-
-
-
             // Show stream resolutions
             std::string depth_res = "Depth: " + std::to_string(depth.get_width()) + "x" + std::to_string(depth.get_height());
             std::string color_res = "Color: " + std::to_string(color.get_width()) + "x" + std::to_string(color.get_height());
             std::string str_roll = "Roll: " + std::to_string(roll_deg);
             std::string str_yaw = "Yaw: " + std::to_string(yaw_deg);
+            
+            // Set the drawing color to black with 50% transparency
+            glColor4f(0.0f, 0.0f, 0.0f, 0.5f); // RGBA
+
+            // Draw a filled rectangle using triangle fan
+            glBegin(GL_TRIANGLE_FAN);
+            glVertex2f(0.0f, 0.0f); // Top-left corner
+            glVertex2f(150.0f, 0.0f); // Top-right corner
+            glVertex2f(150.0f, 150.0f); // Bottom-right corner
+            glVertex2f(0.0f, 150.0f); // Bottom-left corner
+            glEnd();
+
+            if (app_state.tracking) drawCross(trackedPixel[0], trackedPixel[1]);
 
             glColor3f(1.f, 1.f, 1.f);
             draw_text(10, 10, depth_res.c_str());
             draw_text(10, 20, color_res.c_str());
             glColor3f(1.f, 0.f, 1.f);
-            draw_text(10, 40, str_roll.c_str());
+            draw_text(10, 50, str_roll.c_str());
             glColor3f(0.f, 1.f, 1.f);
-            draw_text(10, 50, str_yaw.c_str());
-
+            draw_text(10, 60, str_yaw.c_str());
+            glColor3f(1.f, 1.f, 0.f);
+            draw_text(10, 80, str_tracked.c_str());
             // Draw intersecting lines
             glLineWidth(1.0f); // Set line width
             glBegin(GL_LINES);
@@ -446,4 +556,34 @@ void register_glfw_callbacks(window& app, state& app_state)
             // Continuously update the mouse position
             app_state.mouse_position = { static_cast<int>(x), static_cast<int>(y) };
         };
+}
+
+void drawCross(int centerX, int centerY) {
+    int halfSize = 50; // Half the size of the cross to center it around (centerX, centerY)
+
+    // Enable blending if you want anti-aliased lines
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // Set line width if desired
+    glLineWidth(2.0f);
+
+    // Set color to white
+    glColor3f(1.0f, 1.0f, 1.0f);
+
+    // Start drawing lines
+    glBegin(GL_LINES);
+
+    // Horizontal line (left to right)
+    glVertex2f(centerX - halfSize, centerY);
+    glVertex2f(centerX + halfSize, centerY);
+
+    // Vertical line (bottom to top)
+    glVertex2f(centerX, centerY - halfSize);
+    glVertex2f(centerX, centerY + halfSize);
+
+    glEnd();
+
+    // Reset OpenGL states as necessary
+    glDisable(GL_BLEND);
 }
