@@ -58,71 +58,17 @@ state app_state;
 // Helper function to register to UI events
 void register_glfw_callbacks(window& app, state& app_state);
 
+// draws openGL cross
 void drawCross(int centerX, int centerY);
 
+// transforms from sensor coordinate frame to robot coordinate frame
+void transformPoint(const float sourcePoint[3], float destPoint[3]);
+
 // Find closest blob keypoint
-cv::KeyPoint findClosestKeypoint(const std::vector<cv::KeyPoint>& keypoints, const pixel& pixel, int maxDistance) {
-    if (keypoints.empty()) {
-        throw std::runtime_error("The keypoints vector is empty.");
-    }
-
-    double minDistance = std::numeric_limits<double>::max();
-    cv::KeyPoint closestKeypoint;
-    bool found = false;
-
-    for (const auto& keypoint : keypoints) {
-        double dx = keypoint.pt.x - pixel.first;
-        double dy = keypoint.pt.y - pixel.second;
-        double distance = std::sqrt(dx * dx + dy * dy);
-
-        if (distance < minDistance) {
-            minDistance = distance;
-            closestKeypoint = keypoint;
-            found = true;
-        }
-    }
-
-    if (!found || minDistance > maxDistance) {
-        throw std::runtime_error("No keypoints found within the maximum distance.");
-    }
-
-    return closestKeypoint;
-}
-
-cv::KeyPoint findClosestKeypoint(const std::vector<cv::KeyPoint>& keypoints, const cv::KeyPoint& referenceKeypoint, int maxDistance) {
-    if (keypoints.empty()) {
-        throw std::runtime_error("The keypoints vector is empty.");
-    }
-
-    double minDistance = std::numeric_limits<double>::max();
-    cv::KeyPoint closestKeypoint;
-    bool found = false;
-
-    for (const auto& keypoint : keypoints) {
-        double dx = keypoint.pt.x - referenceKeypoint.pt.x;
-        double dy = keypoint.pt.y - referenceKeypoint.pt.y;
-        double distance = std::sqrt(dx * dx + dy * dy);
-
-        if (distance < minDistance) {
-            minDistance = distance;
-            closestKeypoint = keypoint;
-            found = true;
-        }
-    }
-
-    if (!found || minDistance > maxDistance) {
-        throw std::runtime_error("No keypoints found within the maximum distance.");
-    }
-
-    return closestKeypoint;
-}
-
-pixel keypointToPixel(const cv::KeyPoint& keypoint) {
-    // Convert float coordinates to integer coordinates
-    int x = static_cast<int>(keypoint.pt.x + 0.5); // Adding 0.5 for rounding
-    int y = static_cast<int>(keypoint.pt.y + 0.5); // Adding 0.5 for rounding
-    return { x, y };
-}
+cv::KeyPoint findClosestKeypoint(const std::vector<cv::KeyPoint>& keypoints, const pixel& pixel, int maxDistance);
+cv::KeyPoint findClosestKeypoint(const std::vector<cv::KeyPoint>& keypoints, const cv::KeyPoint& referenceKeypoint, int maxDistance);
+// Converts Keypoint coordinates to pixel
+pixel keypointToPixel(const cv::KeyPoint& keypoint);
 
 #ifdef CV_WINDOW
 // openCV slider callbacks
@@ -317,6 +263,7 @@ int main(int argc, char* argv[]) try
     std::string str_tracked = "Not tracking";
     float trackedPixel[2];
     float trackedPoint[3];
+    float outputPoint[3] = { 0,0,0 };
     // && cv::waitKey(1) < 0 && cv::getWindowProperty(window_name, cv::WND_PROP_AUTOSIZE) >= 0 - for openCV test window
     while (app) // Application still alive?
     {
@@ -366,39 +313,10 @@ int main(int argc, char* argv[]) try
                 app_state.trackLABmax = cv::Scalar(app_state.trackColorLab[0] + threshold_LAB_L, app_state.trackColorLab[1] + threshold_LAB_AB, app_state.trackColorLab[2] + threshold_LAB_AB);
                 app_state.start_tracking = true;
 
-                auto intr = depth.get_profile().as<rs2::video_stream_profile>().get_intrinsics();
-                // Get distance at pixel coordinates
-                float distance = depth.get_distance(app_state.last_click.first, app_state.last_click.second);
-
-                if (distance > 0) {
-                    rs2_deproject_pixel_to_point(point, &intr, pixel, distance);
-
-                    std::cout << "2D [" << app_state.last_click.first << ", " << app_state.last_click.second << "], ";
-                    std::cout << std::fixed << std::setprecision(4) << "3D [" << point[0] << ", " << point[1] << ", " << point[2] << "]";
-                    // Calculate the distance from the current point to the last point
-                    if (!(app_state.last_point[0] == 0 && app_state.last_point[1] == 0 && app_state.last_point[2] == 0)) {
-                        float dx = point[0] - app_state.last_point[0];
-                        float dy = point[1] - app_state.last_point[1];
-                        float dz = point[2] - app_state.last_point[2];
-                        float distance_to_last_point = sqrt(dx * dx + dy * dy + dz * dz);
-                        std::cout << ", distance to last point: " << distance_to_last_point << "m";
-                    }
-                    app_state.last_point[0] = point[0];
-                    app_state.last_point[1] = point[1];
-                    app_state.last_point[2] = point[2];
-
-                    std::cout << std::endl;
-
-                }
-                else {
-                    std::cout << "Invalid depth value." << std::endl;
-                }
-                std::cout << std::endl;
                 app_state.new_click = false; // Ensure the message is printed once per click
             }
 
             // OpenCV
-
             // perform color separation
             cv::Mat maskLAB;
             cv::inRange(cvColor, app_state.trackLABmin, app_state.trackLABmax, maskLAB);
@@ -428,9 +346,12 @@ int main(int argc, char* argv[]) try
                     if (distance > 0) {
                         rs2_deproject_pixel_to_point(trackedPoint, &intr, trackedPixel, distance);
                         str_tracked += ",\nx: " + std::to_string(trackedPoint[0]) + ",\ny: " + std::to_string(trackedPoint[1]) + ",\nz: " + std::to_string(trackedPoint[2]);
+                        transformPoint(trackedPoint, outputPoint);
+                        str_tracked += "\nTransformed:\nx: " + std::to_string(outputPoint[0]) + ",\ny: " + std::to_string(outputPoint[1]) + ",\nz: " + std::to_string(outputPoint[2]);
+
                     }
                     else {
-                        str_tracked += "\n Invalid depth";
+                        str_tracked += "\n Invalid depth\n";
                     }
 
                 } catch (const std::runtime_error& e) {
@@ -488,8 +409,8 @@ int main(int argc, char* argv[]) try
             glBegin(GL_TRIANGLE_FAN);
             glVertex2f(0.0f, 0.0f); // Top-left corner
             glVertex2f(150.0f, 0.0f); // Top-right corner
-            glVertex2f(150.0f, 150.0f); // Bottom-right corner
-            glVertex2f(0.0f, 150.0f); // Bottom-left corner
+            glVertex2f(150.0f, 200.0f); // Bottom-right corner
+            glVertex2f(0.0f, 200.0f); // Bottom-left corner
             glEnd();
 
             if (app_state.tracking) drawCross(trackedPixel[0], trackedPixel[1]);
@@ -587,3 +508,83 @@ void drawCross(int centerX, int centerY) {
     // Reset OpenGL states as necessary
     glDisable(GL_BLEND);
 }
+
+void transformPoint(const float sourcePoint[3], float destPoint[3]) {
+    cv::Matx44f transformH
+    (1, 0, 0, 0,
+     0, 1, 0, -0.09,
+     0, 0, 1, -0.15,
+     0, 0, 0, 1);
+
+    cv::Matx41f sourcePointH(sourcePoint[0], sourcePoint[1], sourcePoint[2], 1.0f);
+    cv::Matx41f destPointH = transformH * sourcePointH;
+
+    destPoint[0] = destPointH(0) / destPointH(3);
+    destPoint[1] = destPointH(1) / destPointH(3);
+    destPoint[2] = destPointH(2) / destPointH(3);
+}
+
+cv::KeyPoint findClosestKeypoint(const std::vector<cv::KeyPoint>& keypoints, const pixel& pixel, int maxDistance) {
+    if (keypoints.empty()) {
+        throw std::runtime_error("The keypoints vector is empty.");
+    }
+
+    double minDistance = std::numeric_limits<double>::max();
+    cv::KeyPoint closestKeypoint;
+    bool found = false;
+
+    for (const auto& keypoint : keypoints) {
+        double dx = keypoint.pt.x - pixel.first;
+        double dy = keypoint.pt.y - pixel.second;
+        double distance = std::sqrt(dx * dx + dy * dy);
+
+        if (distance < minDistance) {
+            minDistance = distance;
+            closestKeypoint = keypoint;
+            found = true;
+        }
+    }
+
+    if (!found || minDistance > maxDistance) {
+        throw std::runtime_error("No keypoints found within the maximum distance.");
+    }
+
+    return closestKeypoint;
+}
+
+cv::KeyPoint findClosestKeypoint(const std::vector<cv::KeyPoint>& keypoints, const cv::KeyPoint& referenceKeypoint, int maxDistance) {
+    if (keypoints.empty()) {
+        throw std::runtime_error("The keypoints vector is empty.");
+    }
+
+    double minDistance = std::numeric_limits<double>::max();
+    cv::KeyPoint closestKeypoint;
+    bool found = false;
+
+    for (const auto& keypoint : keypoints) {
+        double dx = keypoint.pt.x - referenceKeypoint.pt.x;
+        double dy = keypoint.pt.y - referenceKeypoint.pt.y;
+        double distance = std::sqrt(dx * dx + dy * dy);
+
+        if (distance < minDistance) {
+            minDistance = distance;
+            closestKeypoint = keypoint;
+            found = true;
+        }
+    }
+
+    if (!found || minDistance > maxDistance) {
+        throw std::runtime_error("No keypoints found within the maximum distance.");
+    }
+
+    return closestKeypoint;
+}
+
+pixel keypointToPixel(const cv::KeyPoint& keypoint) {
+    // Convert float coordinates to integer coordinates
+    int x = static_cast<int>(keypoint.pt.x + 0.5); // Adding 0.5 for rounding
+    int y = static_cast<int>(keypoint.pt.y + 0.5); // Adding 0.5 for rounding
+    return { x, y };
+}
+
+        
