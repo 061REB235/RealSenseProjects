@@ -6,6 +6,7 @@
 
 #include <opencv2/opencv.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
+#include <opencv2/features2d.hpp>
 #include <opencv2/highgui/highgui.hpp>
 
 // This example will require several standard data-structures and algorithms:
@@ -18,20 +19,77 @@
 #include <atomic>
 #include <mutex>
 
+
+// uncoment to enable opencv blob prieview window with sliders
+//#define CV_WINDOW
+
+// color filter and blob detection defaults
+int threshold_LAB_L = 50;
+int threshold_LAB_AB = 15;
+int dilate_size = 2;
+
+int Circularity_min = 50;
+int Convexity_min = 70; 
+int Inertia_min = 60; 
+
+cv::Ptr<cv::SimpleBlobDetector> blobDetector;
+cv::SimpleBlobDetector::Params blobParams;
+
+
 using pixel = std::pair<int, int>;
 
 // Application state shared between the main-thread and GLFW events
 struct state {
     bool new_click = false;
+    bool track = false;
     pixel last_click;
     pixel mouse_position; // Add this to track the mouse position continuously
     float last_point[3] = { 0, 0, 0 }; // To store the last 3D point
+    cv::Scalar trackLABmin{ 0, 0, 0 };
+    cv::Scalar trackLABmax{ 0, 0, 0 };
+    cv::Vec3b trackColorLab{ 0, 0, 0 };
+
 };
+
+state app_state;
 
 // Helper function to register to UI events
 void register_glfw_callbacks(window& app, state& app_state);
 
-static cv::Mat frame_to_mat(const rs2::frame& f);
+#ifdef CV_WINDOW
+// openCV slider callbacks
+void cv_slider_1(int value, void* userdata) {
+    threshold_LAB_L = value;
+    app_state.trackLABmin = cv::Scalar(app_state.trackColorLab[0] - threshold_LAB_L, app_state.trackColorLab[1] - threshold_LAB_AB, app_state.trackColorLab[2] - threshold_LAB_AB);
+    app_state.trackLABmax = cv::Scalar(app_state.trackColorLab[0] + threshold_LAB_L, app_state.trackColorLab[1] + threshold_LAB_AB, app_state.trackColorLab[2] + threshold_LAB_AB);
+}
+void cv_slider_2(int value, void* userdata) {
+    threshold_LAB_AB = value;
+    app_state.trackLABmin = cv::Scalar(app_state.trackColorLab[0] - threshold_LAB_L, app_state.trackColorLab[1] - threshold_LAB_AB, app_state.trackColorLab[2] - threshold_LAB_AB);
+    app_state.trackLABmax = cv::Scalar(app_state.trackColorLab[0] + threshold_LAB_L, app_state.trackColorLab[1] + threshold_LAB_AB, app_state.trackColorLab[2] + threshold_LAB_AB);
+}
+void cv_dilate_dilate_slider(int value, void* userdata) {
+    dilate_size = value;
+}
+
+void cv_blob_slider_circ_min(int value, void* userdata) {
+    if (value == 0) value = 1;
+    blobParams.minCircularity = value / 100.0f;
+    blobDetector = cv::SimpleBlobDetector::create(blobParams);
+}
+
+void cv_blob_slider_convex_min(int value, void* userdata) {
+    if (value == 0) value = 1;
+    blobParams.minConvexity = value / 100.0f;
+    blobDetector = cv::SimpleBlobDetector::create(blobParams);
+}
+
+void cv_blob_slider_inertia_min(int value, void* userdata) {
+    if (value == 0) value = 1;
+    blobParams.minInertiaRatio = value / 100.0f;
+    blobDetector = cv::SimpleBlobDetector::create(blobParams);
+}
+#endif
 
 int main(int argc, char* argv[]) try
 {
@@ -67,7 +125,6 @@ int main(int argc, char* argv[]) try
     // We do this because:
     //   a. Usually depth has wider FOV, and we only really need depth for this demo
     //   b. We don't want to introduce new holes
-    rs2::align align_to_depth(RS2_STREAM_DEPTH);
     rs2::align align_to_color(RS2_STREAM_COLOR);
 
     // Declare RealSense pipeline, encapsulating the actual device and sensors
@@ -78,7 +135,7 @@ int main(int argc, char* argv[]) try
         cfg.enable_device(serial);
 
     cfg.enable_stream(RS2_STREAM_DEPTH, 1280, 720, RS2_FORMAT_Z16, 30);
-    cfg.enable_stream(RS2_STREAM_COLOR, 1280, 720, RS2_FORMAT_RGBA8, 30);
+    cfg.enable_stream(RS2_STREAM_COLOR, 1280, 720, RS2_FORMAT_RGB8, 30);
     cfg.enable_stream(RS2_STREAM_ACCEL, RS2_FORMAT_MOTION_XYZ32F);
 
     auto profile = pipe.start(cfg);
@@ -93,14 +150,10 @@ int main(int argc, char* argv[]) try
 
     auto stream = profile.get_stream(RS2_STREAM_DEPTH).as<rs2::video_stream_profile>();
 
-    //opencv window
-    const auto window_name = "OpenCV Image";
-    cv::namedWindow(window_name, cv::WINDOW_AUTOSIZE);
-
+    
     // Create a simple OpenGL window for rendering:
     window app(stream.width(), stream.height(), "BlobTracker");
 
-    state app_state;
 
     register_glfw_callbacks(app, app_state);
 
@@ -108,7 +161,46 @@ int main(int argc, char* argv[]) try
 
     std::atomic_bool alive{ true };
 
+    // opencv blob tracker
+    //blobParams.thresholdStep = 10;
+    blobParams.minThreshold = 0.0f;
+    blobParams.maxThreshold = 100.0f;
+    //blobParams.minDistBetweenBlobs = 0.5;
+    // Filter by Area
+    blobParams.filterByArea = true;
+    blobParams.minArea = 300;
+    blobParams.maxArea = 600000;
 
+    // Filter by Circularity
+    blobParams.filterByCircularity = true;
+    blobParams.minCircularity = Circularity_min/100.0f;
+    blobParams.maxCircularity = 1.0f;
+
+    // Filter by Convexity
+    blobParams.filterByConvexity = true;
+    blobParams.minConvexity = Convexity_min/100.0f;
+    blobParams.maxConvexity = 1.0f;
+
+    // Filter by Inertia
+    blobParams.filterByInertia = true;
+    blobParams.minInertiaRatio = Inertia_min/100.0f;
+    blobParams.maxInertiaRatio = 1.0f;
+    blobDetector = cv::SimpleBlobDetector::create(blobParams);
+
+    //opencv window
+ #ifdef CV_WINDOW
+    const auto window_name = "OpenCV Image";
+    cv::namedWindow(window_name, cv::WINDOW_AUTOSIZE);
+    cv::createTrackbar("L* Th", "OpenCV Image", &threshold_LAB_L, 255, cv_slider_1);
+    cv::createTrackbar("a*, b* Th", "OpenCV Image", &threshold_LAB_AB, 255, cv_slider_2);
+    cv::createTrackbar("dilate it", "OpenCV Image", &dilate_size, 21, cv_dilate_dilate_slider);
+    cv::createTrackbar("minConvex", "OpenCV Image", &Convexity_min, 100, cv_blob_slider_convex_min);
+    cv::createTrackbar("minCircle", "OpenCV Image", &Circularity_min, 100, cv_blob_slider_circ_min);
+    cv::createTrackbar("minInertia", "OpenCV Image", &Inertia_min, 100, cv_blob_slider_inertia_min);
+    
+ #endif
+    
+        
     
 
     // Video-processing thread will fetch frames from the camera,
@@ -153,8 +245,9 @@ int main(int argc, char* argv[]) try
         });
 
     rs2::frameset current_frameset;
+    cv::Mat cvColor;
     // && cv::waitKey(1) < 0 && cv::getWindowProperty(window_name, cv::WND_PROP_AUTOSIZE) >= 0 - for openCV test window
-    while (app && cv::waitKey(1) < 0 && cv::getWindowProperty(window_name, cv::WND_PROP_AUTOSIZE) >= 0) // Application still alive?
+    while (app) // Application still alive?
     {
         // Fetch the latest available post-processed frameset
 
@@ -166,11 +259,6 @@ int main(int argc, char* argv[]) try
             auto color = current_frameset.get_color_frame();
             auto colorized_depth = current_frameset.first(RS2_STREAM_DEPTH, RS2_FORMAT_RGB8);
             auto accel_frame = current_frameset.first_or_default(RS2_STREAM_ACCEL);
-
-            //OpenCV
-            cv::Mat cvColor = frame_to_mat(color);
-            cv::imshow(window_name, cvColor);
-            
            
             rs2_vector accel_data = accel_frame.as<rs2::motion_frame>().get_motion_data();
             // Calculate pitch and roll in radians
@@ -178,8 +266,8 @@ int main(int argc, char* argv[]) try
             float roll = atan2(accel_data.y, accel_data.z);
 
             // Convert radians to degrees
-            float yaw_deg = yaw * (180.0f / M_PI);
-            float roll_deg = roll * (180.0f / M_PI);
+            float yaw_deg = (float)(yaw * (180.0f / M_PI));
+            float roll_deg = (float)(roll * (180.0f / M_PI));
             // Adjust roll by 90 degrees for horizontal alignment
             roll_deg += 90.0f;
 
@@ -187,11 +275,62 @@ int main(int argc, char* argv[]) try
                 roll_deg -= 360.0f;
             }
 
+            // OpenCV
+            // convert rs color frame to cv Lab colors
+            cv::Mat r_rgb = cv::Mat(cv::Size(color.get_width(), color.get_height()), CV_8UC3, (void*)color.get_data(), cv::Mat::AUTO_STEP);
+            cv::Mat cvColor;
+            cvtColor(r_rgb, cvColor, cv::COLOR_RGB2Lab);
+
+            // perform folor separation
+            cv::Mat maskLAB, invMaskLAB, cvBlob, mat_with_keypoints;
+            cv::inRange(cvColor, app_state.trackLABmin, app_state.trackLABmax, maskLAB);
+
+            cv::Mat element = cv::getStructuringElement(cv::MORPH_RECT,
+                cv::Size(2 * dilate_size + 1, 2 * dilate_size + 1),
+                cv::Point(dilate_size, dilate_size));
+            cv::dilate(maskLAB, maskLAB, element);
+
+            cv::bitwise_and(cvColor, cvColor, cvBlob, maskLAB);
+
+            invMaskLAB = 255 - maskLAB;
+
+            std::vector<cv::KeyPoint> keypoints;
+            blobDetector->detect(invMaskLAB, keypoints);
+            cv::drawKeypoints(invMaskLAB, keypoints, mat_with_keypoints, cv::Scalar(0, 0, 255), cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS);
+           
+            
+            
+            //cv::threshold(grey, grey, 127, 255, cv::THRESH_BINARY);
+
+            //cvtColor(grey, grey, cv::COLOR_BGR2GRAY);
+            //std::vector<cv::Mat> cvColorChannels(3);
+           // cv::split(cvBlob, cvColorChannels); // Split into L, a, b channels
+            //cv::Mat grey = cvColorChannels[0]; // The L channel is the lightness and can be used directly as a grayscale image
+            //grey = 255-grey;
+            // Detect blobs
+           // std::vector<cv::KeyPoint> keypoints;
+            //blobDetector->detect(grey, keypoints);
+           // cv::Mat im_with_keypoints;
+            //cv::drawKeypoints(grey, keypoints, im_with_keypoints, cv::Scalar(0, 0, 255), cv::DrawMatchesFlags::DRAW_RICH_KEYPOINTS);
+
+
+#ifdef CV_WINDOW
+            cv::imshow(window_name, mat_with_keypoints);
+#endif
+            
 
             if (app_state.new_click)
             {
                 float pixel[2] = { float(app_state.last_click.first), float(app_state.last_click.second) };
                 float point[3];
+
+                // openCV get pixel color
+                app_state.trackColorLab = cvColor.at<cv::Vec3b>(app_state.last_click.second, app_state.last_click.first);
+                // set color range and enable tracking
+                app_state.trackLABmin = cv::Scalar(app_state.trackColorLab[0] - threshold_LAB_L, app_state.trackColorLab[1] - threshold_LAB_AB, app_state.trackColorLab[2] - threshold_LAB_AB);
+                app_state.trackLABmax = cv::Scalar(app_state.trackColorLab[0] + threshold_LAB_L, app_state.trackColorLab[1] + threshold_LAB_AB, app_state.trackColorLab[2] + threshold_LAB_AB);
+                app_state.track = true;
+
                 auto intr = depth.get_profile().as<rs2::video_stream_profile>().get_intrinsics();
                 // Get distance at pixel coordinates
                 float distance = depth.get_distance(app_state.last_click.first, app_state.last_click.second);
@@ -222,7 +361,7 @@ int main(int argc, char* argv[]) try
                 std::cout << std::endl;
                 app_state.new_click = false; // Ensure the message is printed once per click
             }
-
+            
 
             glEnable(GL_BLEND);
             // Use the Alpha channel for blending
@@ -307,47 +446,4 @@ void register_glfw_callbacks(window& app, state& app_state)
             // Continuously update the mouse position
             app_state.mouse_position = { static_cast<int>(x), static_cast<int>(y) };
         };
-}
-
-static cv::Mat frame_to_mat(const rs2::frame& f)
-{
-    using namespace cv;
-    using namespace rs2;
-
-    auto vf = f.as<video_frame>();
-    const int w = vf.get_width();
-    const int h = vf.get_height();
-
-    if (f.get_profile().format() == RS2_FORMAT_BGR8)
-    {
-        return Mat(Size(w, h), CV_8UC3, (void*)f.get_data(), Mat::AUTO_STEP);
-    }
-    else if (f.get_profile().format() == RS2_FORMAT_RGB8)
-    {
-        auto r_rgb = Mat(Size(w, h), CV_8UC3, (void*)f.get_data(), Mat::AUTO_STEP);
-        Mat r_bgr;
-        cvtColor(r_rgb, r_bgr, COLOR_RGB2BGR);
-        return r_bgr;
-    }
-    else if (f.get_profile().format() == RS2_FORMAT_RGBA8)
-    {
-        auto r_rgba = Mat(Size(w, h), CV_8UC4, (void*)f.get_data(), Mat::AUTO_STEP);
-        Mat r_bgra;
-        cvtColor(r_rgba, r_bgra, COLOR_RGBA2BGRA);
-        return r_bgra;
-    }
-    else if (f.get_profile().format() == RS2_FORMAT_Z16)
-    {
-        return Mat(Size(w, h), CV_16UC1, (void*)f.get_data(), Mat::AUTO_STEP);
-    }
-    else if (f.get_profile().format() == RS2_FORMAT_Y8)
-    {
-        return Mat(Size(w, h), CV_8UC1, (void*)f.get_data(), Mat::AUTO_STEP);
-    }
-    else if (f.get_profile().format() == RS2_FORMAT_DISPARITY32)
-    {
-        return Mat(Size(w, h), CV_32FC1, (void*)f.get_data(), Mat::AUTO_STEP);
-    }
-
-    throw std::runtime_error("Frame format is not supported yet!");
 }
